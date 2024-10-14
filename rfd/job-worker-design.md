@@ -137,7 +137,7 @@ JobInfo, which holds the following information:
 
 #### StopJob(JobID string) error
 * Looks up the jobMap, if the job is "Running", gets the PID of the job, sends the signal SIGTERM to stop the job.
-* The goroutine monitoring the job, started by StartJob() function updates the job status in jobMap.
+* The goroutine monitoring the job, started by StartJob() function, updates the job status in jobMap when the job process exits.
 
 #### GetJobStatus(JobID string) (string, error)
 * Returns the current status of the job ("Running", "Exited (`<exit code>`)", or "Terminated (Signal: `<signal number>`)")
