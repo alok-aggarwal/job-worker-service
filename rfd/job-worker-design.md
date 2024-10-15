@@ -72,7 +72,7 @@ message StreamJobOutputRequest {
     string job_id = 1;          
 }
 message JobOutputResponse {
-    string output = 1;          // One line of the job output log file
+    bytes output = 1;          // Raw byte output from the job log
 }
 message ListJobsRequest {}
 message ListJobsResponse {
@@ -116,28 +116,31 @@ JobInfo, which holds the following information:
 
 ### Process Execution Lifecycle
 * Job Starting: Jobs are started using os/exec.Command(), and the process is placed into isolated namespaces 
-  (PID, network, mount)
+  (PID, network, mount). A process group is assigned so that all children are in the same group.
 * Resource Limits: When starting a job, cgroups are optionally applied to control CPU, memory, and I/O usage 
-* Monitoring Jobs: The lifecycle of each job is monitored internally using waitpid(), capturing both the exit status 
+* Monitoring Jobs: The lifecycle of each job is monitored internally using os.Exec.Wait(), capturing both the exit status
   and signal terminations.
-* Job Termination: Stopping a job involves sending a termination signal (SIGTERM) and updating the status in the 
-  jobMap accordingly.
+* Job Termination: Stopping a job involves sending a KILL signal (SIGKILL) to the process group (parent process and its
+  children) and updating the status in the jobMap accordingly.
 
 ### Library Functions
 #### StartJob(command string, args []string, cpu_limit float, mem_limit int, io_limit int) (jobId string, error)
-* Starts a new job, creates resource limits cgroups files (cpu.max, memory.max), and namespace isolation PID, network, 
-  and mount namespaces via flags CLONE_NEWPID, CLONE_NEWNET , CLONE_NEWNS creates new memory, cpu and IO cgroup files and 
-  adds this pid to them.
+* Starts a new job, creates namespace isolation for PID, network, and mount namespaces via flags CLONE_NEWPID, CLONE_NEWNET,
+  CLONE_NEWNS. It also creates new memory, cpu and IO cgroup files (cpu.max, memory.max), and adds this pid to them. It
+  sets the process group ID to the process itself, so it forms a new group. Any children of this process will be in the same
+  process group. This makes it easier to clean up the process and its children via StopJob().
 * Creates a unique JobId using uuidv4, adds the job to the jobMap under a mutex with the initial status "Running".
 * Redirects the process's stderr and stdout to a logfile called jobLogs/`<jobId>`.log
-* Starts a new goroutine to monitor the exit status of the job via waitpid() call. waitpid() is also set up to capture the 
-  signal sent to the process if any. Once the process ends the goroutine acquires mutex and updates the status of the job in 
-  jobMap.
+* Starts a new goroutine to monitor the exit status of the job. It waits for the process to exit via os.Exec.Wait() call. If the
+  process has errored it captures the error code or the terminating signal number. Once the process ends the goroutine
+  acquires mutex and updates the status of the job in JobMap.
 * Returns the JobID for client interaction.
 
 #### StopJob(JobID string) error
-* Looks up the jobMap, if the job is "Running", gets the PID of the job, sends the signal SIGTERM to stop the job.
-* The goroutine monitoring the job, started by StartJob() function, updates the job status in jobMap when the job process exits.
+* Looks up the jobMap, if the job is "Running", gets the PID, which is also the PGID of the job, sends the signal SIGKILL to PGID
+  to stop the job. This also cleans up all the children of the process.
+* The goroutine monitoring the job, started by StartJob() function, updates the job status in JobMap when the job process exits.
+* The log file associated with the job is cleaned up.
 
 #### GetJobStatus(JobID string) (string, error)
 * Returns the current status of the job ("Running", "Exited (`<exit code>`)", or "Terminated (Signal: `<signal number>`)")
@@ -147,10 +150,10 @@ JobInfo, which holds the following information:
 * Differentiating between normal exits and signal terminations ensures that clients are fully informed about why a job ended.
 
 #### StreamJobOutput(ctx context.Context, jobId string, streamFunc func(string) error) error
-* Creates the logfile path using jobId
+* Constructs the logfile path using jobId
 * Opens the logfile for reading. This is the same logfile which was created in StartJob() function by redirecting stderr and stdout.
-* Streams the logfile line by line, using the streamFunc passed by the gRPC API
-* To emulate "tail -f" behavior, once EOF is reached, it polls for new lines being written in the file as long as the jobStatus 
+* Streams the logfile byte by byte, using the streamFunc passed by the gRPC API
+* To emulate "tail -f" behavior, once EOF is reached, it polls for new bytes being written in the file as long as the jobStatus
   is "Running"
 * Client should be able to end the stream using "ctrl+C". For this, pass the context (from the gRPC stream) into the library 
   function so it stops processing when the client cancels the request.
