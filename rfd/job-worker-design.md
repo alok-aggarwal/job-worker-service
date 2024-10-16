@@ -18,7 +18,7 @@ The CLI allows users to interact with the Job Worker server to manage jobs. The 
 using the Cobra library, which provides a flexible framework for parsing commands and arguments.
 
 ### Example CLI Commands
-#### runjob-cli start --cmd="program" --cpu-limit=0.2 --mem-limit=256 --io-limit=100
+#### runjob-cli start --cmd="program"
 The command returns a unique JobID that is used for further interactions with the job.
 #### runjob-cli stop --job-id=`<JobID>`
 #### runjob-cli status --job-id=`<JobID>`
@@ -28,11 +28,11 @@ Streams the real-time output (both stdout and stderr) of the running process to 
 Use ctrl+C to stop streaming.
 #### runjob-cli list-jobs
 ```
-Job ID     Command                       Status
----------------------------------------------------------------
-abc123     /bin/ls -al                    Running
-xyz456     /usr/bin/top                   Exited
-def789     /usr/bin/sleep 1000            Running
+Job ID     Command                       Status           Exit Code     Signal Num
+------------------------------------------------------------------------------------
+abc123     /bin/ls -al                    Running           
+xyz456     /usr/bin/top                   Exited           0
+def789     /usr/bin/sleep 1000            Terminated                      9
 ```
 
 ## Job Worker (Server)
@@ -43,7 +43,7 @@ The server runs with root privileges as it needs to create namespaces for each j
 service JobWorker {
     rpc StartJob(StartJobRequest) returns (StartJobResponse);
     rpc StopJob(StopJobRequest) returns (StopJobResponse);
-    rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+    rpc GetJobStatus(GetJobStatusRequest) returns (JobStatus);
     rpc StreamJobOutput(StreamJobOutputRequest) returns (stream JobOutputResponse);
     rpc ListJobs (ListJobsRequest) returns (ListJobsResponse);
 }
@@ -65,8 +65,12 @@ message StopJobResponse {}
 message GetJobStatusRequest {
     string job_id = 1;      
 }
-message GetJobStatusResponse {
-    string status = 1;         // "Running", "Exited", or "Terminated"
+message JobStatus {      
+    string job_id = 1;
+    string command = 2;
+    string status = 3;       // "Running", "Exited", "Terminated" or "Server Error"
+    string exit_code = 4;    // non null if status = "Exited"
+    string sig_num = 5;      // non null if status = "Terminated"
 }
 message StreamJobOutputRequest {
     string job_id = 1;          
@@ -76,12 +80,7 @@ message JobOutputResponse {
 }
 message ListJobsRequest {}
 message ListJobsResponse {
-    repeated Job job_list = 1;
-}
-message Job {
-    string job_id = 1;
-    string command = 2;
-    string status = 3;
+    repeated JobStatus job_list = 1;
 }
 ```
 
@@ -105,10 +104,13 @@ their lifecycle, and streaming output to the CLI. The library does not expose mo
 ### jobMap
 The jobMap is a data structure that maintains the state of all jobs. It maps the JobID (the key) to a structure called 
 JobInfo, which holds the following information:
-* Pid: The Linux process ID of the job.
-* Status: The current status of the job (Running, Exited, or Terminated).
-* ExitCode: The exit code of the job if it exited normally.
+
+* PID: The Linux process ID of the job.
+* Cmd: The job/process command with arguments
+* Status: The current status of the job (Running, Exited, Terminated or "Server Error").
+* ExitCode: The exit code of the job.
 * Signal Number: If the job was terminated by a signal, the signal number is stored.
+* Exit Channel: Used by the StartJob monitor goroutine to notify the process has exited or been terminated to streamOutput goroutine.
 
 ### Concurrency
  The jobMap is accessed by multiple clients and goroutines simultaneously, so it is protected with a read-write mutex 
@@ -117,23 +119,46 @@ JobInfo, which holds the following information:
 ### Process Execution Lifecycle
 * Job Starting: Jobs are started using os/exec.Command(), and the process is placed into isolated namespaces 
   (PID, network, mount). A process group is assigned so that all children are in the same group.
-* Resource Limits: When starting a job, cgroups are optionally applied to control CPU, memory, and I/O usage 
+* Resource Limits: When starting a job, cgroups limits are applied to control CPU, memory, and I/O usage. These are pre-
+  configured static limits for each job.
 * Monitoring Jobs: The lifecycle of each job is monitored internally using os.Exec.Wait(), capturing both the exit status
   and signal terminations.
 * Job Termination: Stopping a job involves sending a KILL signal (SIGKILL) to the process group (parent process and its
   children) and updating the status in the jobMap accordingly.
 
+### Job Worker Helper Process
+The jw_helper process is a helper invoked by StartJob() library function. Its main purpose is to attach to cgroups before exec'ing
+into the client requested command. It gets passed the JobId and the program command requested by the client as command line arguments. 
+jw_helper allows the Job Worker server to keep its responsibilities focused on job management, while jw_helper handles low-level
+system operations like setting up cgroups and namespaces. It performs the following tasks:
+* Cgroup Association: It attaches itself to the cgroup created by the server
+* Namespace Isolation: It sets up the job to run in isolated namespaces (PID, mount, and network) via flags CLONE_NEWPID, CLONE_NEWNET,
+  CLONE_NEWNS.
+* Log Redirection: It redirects the job’s stdout and stderr to a log file named <JobID>.log.
+* Job Execution: After performing the setup tasks, jw_helper uses execve() to replace itself with the client-requested job, so the
+  job runs in the same process.
+#### Error reporting to the server process
+Before jw_helper executes the requested job, it communicates any setup failures (like cgroup attachment or namespace setup errors)
+through a pipe that was passed to it by the Job Worker (StartJob() library function). StartJob() creates the pipe before invoking 
+jw_helper. During the setup phase, jw_helper writes either an "OK" (for success) or "FAIL" to the pipe. The Job Worker 
+reads from the pipe. If an error message is received, the Job Worker terminates the job early, returns the error to the client and
+updates the status "Server Error" in the JobMap status field.
+
 ### Library Functions
+#### SetupCgroups() error
+* Creates new memory, cpu and IO cgroup files (cpu.max, memory.max) and sets standard values in them. All jobs managed by the
+Job Worker Service will be bounded by these limits.
+
 #### StartJob(command string, args []string, cpu_limit float, mem_limit int, io_limit int) (jobId string, error)
-* Starts a new job, creates namespace isolation for PID, network, and mount namespaces via flags CLONE_NEWPID, CLONE_NEWNET,
-  CLONE_NEWNS. It also creates new memory, cpu and IO cgroup files (cpu.max, memory.max), and adds this pid to them. It
-  sets the process group ID to the process itself, so it forms a new group. Any children of this process will be in the same
-  process group. This makes it easier to clean up the process and its children via StopJob().
 * Creates a unique JobId using uuidv4, adds the job to the jobMap under a mutex with the initial status "Running".
-* Redirects the process's stderr and stdout to a logfile called jobLogs/`<jobId>`.log
+* Creates a pipe before invoking jw_helper, used to collect any setup failes from jw_helper.
+* invokes jw_helper, passing the client’s job command and JobID as arguments. It also passes the pipe file descriptor to jw_helper
+  for setup status communication.
+* It sets the jw_process group ID to the jw_process PID, so it forms a new group. Any children of this process will be in the same
+  process group. This makes it easier to clean up the process and its children via StopJob().
 * Starts a new goroutine to monitor the exit status of the job. It waits for the process to exit via os.Exec.Wait() call. If the
   process has errored it captures the error code or the terminating signal number. Once the process ends the goroutine
-  acquires mutex and updates the status of the job in JobMap.
+  acquires mutex and updates the status of the job in JobMap. It also notifies in the Job's exit channel that the process has ended.
 * Returns the JobID for client interaction.
 
 #### StopJob(JobID string) error
@@ -143,7 +168,7 @@ JobInfo, which holds the following information:
 * The log file associated with the job is cleaned up.
 
 #### GetJobStatus(JobID string) (string, error)
-* Returns the current status of the job ("Running", "Exited (`<exit code>`)", or "Terminated (Signal: `<signal number>`)")
+* Returns the current status of the job ("Running", "Exited", "Terminated", or "Server Error" with "exit_code" or "signal_number").
 * For simplicity just the above states are maintained. Nice to have could be fetching the process state from /proc/`<pid>`/status
 * Status queries are made using a read lock (RLock()), allowing multiple clients to concurrently query the status of different 
   jobs without blocking
@@ -153,13 +178,14 @@ JobInfo, which holds the following information:
 * Constructs the logfile path using jobId
 * Opens the logfile for reading. This is the same logfile which was created in StartJob() function by redirecting stderr and stdout.
 * Streams the logfile byte by byte, using the streamFunc passed by the gRPC API
-* To emulate "tail -f" behavior, once EOF is reached, it polls for new bytes being written in the file as long as the jobStatus
-  is "Running"
+* To emulate "tail -f" behavior, it adds a watch on the log file using Inotify. Once EOF is reached, it watches for the IN_MODIFY event
+  which is triggered when new data is written to the file. It again continues reading till EOF and repeats pends for more data. 
+  The Inotify watch ends when the monitor goroutine started by StartJob() signals end of the process via the Job's Exit channel.
 * Client should be able to end the stream using "ctrl+C". For this, pass the context (from the gRPC stream) into the library 
-  function so it stops processing when the client cancels the request.
+  function so it stops the Inotify watch when the client cancels the request. 
         
 #### ListJobs() ([]JobInfo, error)
-* Returns a list of jobs, each containing its Job ID, command, and status
+* Returns a list of jobs, each containing its Job ID, command, status, exit code and signal number.
 
 ## TradeOffs
 * The Job Worker service runs with root priviledges so that it can isolate the processes into separate namespaces and can access 
@@ -168,4 +194,5 @@ JobInfo, which holds the following information:
 * Job log files rotation and cleanup is not considered
 * No persistent connection between client and server. Every request is a new connection
 * Client, Server and CA certs and keys are pre-generated
+* Version management between the jw_helper and Server needs to be considered.
 
