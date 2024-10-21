@@ -20,10 +20,10 @@ using the Cobra library, which provides a flexible framework for parsing command
 ### Example CLI Commands
 #### runjob-cli start --cmd="program"
 The command returns a unique JobID that is used for further interactions with the job.
-#### runjob-cli stop --job-id=`<JobID>`
-#### runjob-cli status --job-id=`<JobID>`
+#### runjob-cli stop `<job-id>`
+#### runjob-cli status `<job-id>`
 Possible statuses are Running, Exited (Exit Code), or Terminated (Signal).
-#### runjob-cli stream-output --job-id=`<JobID>`
+#### runjob-cli stream-output `<job-id>`
 Streams the real-time output (both stdout and stderr) of the running process to the terminal from the moment the job starts.
 Use ctrl+C to stop streaming.
 #### runjob-cli list-jobs
