@@ -66,9 +66,9 @@ func NewJobManager() *JobManager {
 }
 
 func getJWHelperPath() (string, error) {
-	path := os.Getenv("JW_HELPER_PATH")
+	path := os.Getenv("JOB_HELPER_PATH")
 	if path == "" {
-		return "", fmt.Errorf("[ERROR] JW_HELPER_PATH environment variable is not set")
+		return "", fmt.Errorf("[ERROR] JOB_HELPER_PATH environment variable is not set")
 	}
 	return path, nil
 }
