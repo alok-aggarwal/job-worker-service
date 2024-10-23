@@ -1,3 +1,6 @@
+// Package main implements a jobhelper that manages and monitors
+// the execution of job processes, handling logging, signals,
+// and communication with jobworker via a pipe.
 package main
 
 import (
@@ -14,12 +17,13 @@ import (
 )
 
 var (
-	logger     *log.Logger
-	jobCmd     *exec.Cmd
-	reportOnce sync.Once
+	logger     *log.Logger // Logger instance for logging jobhelper events.
+	jobCmd     *exec.Cmd   // Command representing the job process.
+	reportOnce sync.Once   // Ensure the exit status is reported only once.
 )
 
-// Initialize the logger.
+// initLogger initializes the logger and ensures that the log file is
+// recreated at the start of the jobhelper.
 func initLogger() {
 	logFilePath := "jobhelper.log"
 	if _, err := os.Stat(logFilePath); err == nil {
@@ -37,6 +41,8 @@ func initLogger() {
 	logger.Println("[INFO] Logger initialized.")
 }
 
+// main is the entry point of the jobhelper process, which sets up the environment,
+// executes the job command, and communicates with jobworker.
 func main() {
 	initLogger()
 
@@ -51,7 +57,7 @@ func main() {
 
 	pipeW := os.NewFile(3, "pipe")
 
-	// Setup job environment.
+	// Setup the job environment and handle any setup errors.
 	if err := setupJobEnvironment(pipeW); err != nil {
 		logAndExit(pipeW, fmt.Sprintf("[ERROR] Setup failed: %v", err))
 	}
@@ -65,6 +71,7 @@ func main() {
 	logger.Println("[INFO] Setup complete. Indicating success to parent process.")
 	fmt.Fprint(pipeW, "OK")
 
+	// Execute the job command and capture the exit status.
 	logger.Printf("[INFO] Executing command: %s with args: %v", command, args)
 	jobCmd = exec.Command(command, args...)
 	jobCmd.Stdout = logFile
@@ -74,13 +81,14 @@ func main() {
 	err = jobCmd.Run()
 	exitCode, signalNum := extractExitStatus(err)
 
-	// Report the exit status
+	// Report the exit status to jobworker.
 	reportOnce.Do(func() {
 		reportExitStatus(pipeW, exitCode, signalNum)
 	})
 }
 
-// Setup the job environment: signal handler, cgroups, namespaces, and PGID.
+// setupJobEnvironment configures the job environment by setting up signal
+// handlers, cgroups, namespaces, and process group IDs (PGID).
 func setupJobEnvironment(pipeW *os.File) error {
 	if err := setupSignalHandler(pipeW); err != nil {
 		return fmt.Errorf("[ERROR] Failed to set up signal handler: %v", err)
@@ -97,7 +105,8 @@ func setupJobEnvironment(pipeW *os.File) error {
 	return nil
 }
 
-// Handle SIGTERM: send SIGKILL to the job process.
+// setupSignalHandler installs a signal handler for SIGTERM to ensure that
+// the job process receives SIGKILL when jobhelper is terminated.
 func setupSignalHandler(pipeW *os.File) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM)
@@ -122,14 +131,14 @@ func setupSignalHandler(pipeW *os.File) error {
 	return nil
 }
 
-// Report exit status to jobworker via the pipe.
+// reportExitStatus sends the exit status and signal number to the jobworker via the pipe.
 func reportExitStatus(pipeW *os.File, exitCode, signalNum int) {
 	logger.Printf("[INFO] Reporting exit status. ExitCode: %d, Signal: %d", exitCode, signalNum)
 	fmt.Fprintf(pipeW, "EXIT %d %d\n", exitCode, signalNum)
 	pipeW.Close()
 }
 
-// Extract exit status and signal number from the error.
+// extractExitStatus extracts the exit code and signal number from the error returned by the job process.
 func extractExitStatus(err error) (int, int) {
 	if err == nil {
 		return 0, 0
@@ -141,6 +150,7 @@ func extractExitStatus(err error) (int, int) {
 	return 1, 0 // Default to 1 for general errors.
 }
 
+// logAndExit logs the error message and exits the jobhelper with status 1.
 func logAndExit(pipeW *os.File, msg string) {
 	logger.Println(msg)
 	fmt.Fprintf(pipeW, "FAIL: %s\n", msg)
@@ -148,6 +158,7 @@ func logAndExit(pipeW *os.File, msg string) {
 	os.Exit(1)
 }
 
+// attachToCgroup attaches the jobhelper process to a specific cgroup.
 func attachToCgroup(pid int) error {
 	cgroupDir := "/sys/fs/cgroup/job"
 	procsFile := filepath.Join(cgroupDir, "cgroup.procs")
@@ -161,11 +172,13 @@ func attachToCgroup(pid int) error {
 	return nil
 }
 
+// setupNamespaces sets up PID, network, and mount namespaces for the job process.
 func setupNamespaces() error {
 	logger.Println("[INFO] Setting up PID, network, and mount namespaces.")
 	return unix.Unshare(unix.CLONE_NEWNS | unix.CLONE_NEWPID | unix.CLONE_NEWNET)
 }
 
+// getLogFile opens or creates the log file for the job process and returns its handle.
 func getLogFile(jobID string) (*os.File, error) {
 	logFilePath := filepath.Join("../jobworker/jobLogs", fmt.Sprintf("%s.log", jobID))
 	logger.Printf("[INFO] Opening log file: %s", logFilePath)

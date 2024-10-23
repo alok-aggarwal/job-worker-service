@@ -1,3 +1,5 @@
+// Package jobworker_test contains tests for the jobworker package,
+// verifying job management and streaming behavior.
 package jobworker_test
 
 import (
@@ -13,15 +15,20 @@ import (
 )
 
 const (
+	// JOB_HELPER_PATH_ENV is the environment variable used to specify the path of the job helper binary.
 	JOB_HELPER_PATH_ENV = "JOB_HELPER_PATH"
-	LOGS_DIR            = "./jobLogs"
+	// LOGS_DIR is the directory where job logs are stored.
+	LOGS_DIR = "./jobLogs"
 )
 
+// setupJobManager initializes a new JobManager instance for testing.
 func setupJobManager() *jobworker.JobManager {
 	os.Setenv(JOB_HELPER_PATH_ENV, "../jobhelper/jobhelper")
 	return jobworker.NewJobManager()
 }
 
+// assertJobExists checks if the job with the given ID exists in the JobManager.
+// It returns the JobInfo if found, otherwise the test fails.
 func assertJobExists(t *testing.T, jm *jobworker.JobManager, jobID string) *jobworker.JobInfo {
 	t.Helper()
 	job, exists := jm.GetJob(jobID)
@@ -29,6 +36,8 @@ func assertJobExists(t *testing.T, jm *jobworker.JobManager, jobID string) *jobw
 	return job
 }
 
+// streamToString streams the output of the specified job and returns it as a string.
+// It uses the provided streamFunc to capture and print the streamed data.
 func streamToString(ctx context.Context, jm *jobworker.JobManager, jobID string) (string, error) {
 	var output []byte
 	streamFunc := func(data []byte) error {
@@ -41,6 +50,8 @@ func streamToString(ctx context.Context, jm *jobworker.JobManager, jobID string)
 	return string(output), err
 }
 
+// TestStartJobShort verifies that a short-running job completes successfully
+// and its output is streamed correctly.
 func TestStartJobShort(t *testing.T) {
 	jm := setupJobManager()
 
@@ -56,7 +67,7 @@ func TestStartJobShort(t *testing.T) {
 	assert.Equal(t, 0, job.ExitCode, "Exit code should be 0")
 
 	logFilePath := filepath.Join(LOGS_DIR, fmt.Sprintf("%s.log", jobID))
-	//defer os.Remove(logFilePath) // Cleanup
+	// defer os.Remove(logFilePath) // Cleanup
 
 	info, err := os.Stat(logFilePath)
 	assert.NoError(t, err, "Logfile not found")
@@ -70,6 +81,7 @@ func TestStartJobShort(t *testing.T) {
 	assert.NotEmpty(t, output, "Job output is empty")
 }
 
+// TestStartJobLong verifies that a long-running job starts and streams output correctly.
 func TestStartJobLong(t *testing.T) {
 	jm := setupJobManager()
 
@@ -84,7 +96,7 @@ func TestStartJobLong(t *testing.T) {
 	assert.Equal(t, jobworker.StatusRunning, status, "Job should be running")
 
 	logFilePath := filepath.Join(LOGS_DIR, fmt.Sprintf("%s.log", jobID))
-	//defer os.Remove(logFilePath) // Cleanup
+	// defer os.Remove(logFilePath) // Cleanup
 
 	info, err := os.Stat(logFilePath)
 	assert.NoError(t, err, "Logfile not found")
@@ -98,6 +110,7 @@ func TestStartJobLong(t *testing.T) {
 	assert.NotEmpty(t, output, "Job output is empty")
 }
 
+// TestStopJobWhileStreaming tests the behavior when a job is stopped while streaming is in progress.
 func TestStopJobWhileStreaming(t *testing.T) {
 	jm := setupJobManager()
 
@@ -126,7 +139,7 @@ func TestStopJobWhileStreaming(t *testing.T) {
 		assert.NotEmpty(t, output, "Job output is empty")
 	}()
 
-	// Wait  to ensure streaming has started.
+	// Wait to ensure streaming has started.
 	time.Sleep(4 * time.Second)
 
 	// Issue StopJob to terminate the job while streaming is in progress.
@@ -136,7 +149,7 @@ func TestStopJobWhileStreaming(t *testing.T) {
 	// Ensure streaming ends after StopJob.
 	select {
 	case <-streamFinished:
-		// Successfully stopped streaming
+		// Successfully stopped streaming.
 	case <-time.After(5 * time.Second):
 		t.Fatal("Streaming did not finish after stopping the job")
 	}

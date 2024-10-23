@@ -11,34 +11,39 @@ import (
 	"github.com/google/uuid"
 )
 
+// JobStatus represents the possible states a job can have.
 type JobStatus string
 
 const (
-	StatusRunning    JobStatus = "Running"
-	StatusExited     JobStatus = "Exited"
-	StatusStopping   JobStatus = "Stopping"
-	StatusTerminated JobStatus = "Terminated"
-	StatusServerErr  JobStatus = "Server Error"
+	StatusRunning    JobStatus = "Running"      // Job is currently running.
+	StatusExited     JobStatus = "Exited"       // Job exited normally.
+	StatusStopping   JobStatus = "Stopping"     // Job is in the process of stopping.
+	StatusTerminated JobStatus = "Terminated"   // Job was terminated by a signal.
+	StatusServerErr  JobStatus = "Server Error" // A server error occurred.
 )
 
-// Metadata of a job.
+// JobInfo holds metadata for a job, including its status, PID, and exit information.
 type JobInfo struct {
-	PID                   int
-	Cmd                   string
-	Status                JobStatus
-	ExitCode              int
-	SignalNum             int
-	ExitChannel           chan struct{}
-	JobTerminationChannel chan struct{} // signal to streamJob
+	PID                   int           // Process ID of the jobhelper.
+	Cmd                   string        // Command executed for the job.
+	Status                JobStatus     // Current status of the job.
+	ExitCode              int           // Exit code of the job.
+	SignalNum             int           // Signal number if the job was terminated by a signal.
+	ExitChannel           chan struct{} // Channel to signal job exit.
+	JobTerminationChannel chan struct{} // Channel to signal job termination to streaming functions.
 }
 
+// JobManager manages jobs, including starting, stopping, and monitoring their status.
 type JobManager struct {
-	jobMap map[string]*JobInfo
-	mu     sync.RWMutex
-	logger *log.Logger
+	jobMap map[string]*JobInfo // Map of job IDs to JobInfo.
+	mu     sync.RWMutex        // Mutex to protect access to jobMap.
+	logger *log.Logger         // Logger for logging job-related events.
 }
 
-// Initialize
+// NewJobManager initializes a new JobManager with logging and cgroup setup.
+//
+// It removes any existing log file and creates a new one.
+// Returns the initialized JobManager instance.
 func NewJobManager() *JobManager {
 	logFilePath := "jobworker.log"
 
@@ -65,6 +70,9 @@ func NewJobManager() *JobManager {
 	}
 }
 
+// getJobHelperPath retrieves the path to the jobhelper binary from the environment variable.
+//
+// Returns the path or an error if the variable is not set.
 func getJobHelperPath() (string, error) {
 	path := os.Getenv("JOB_HELPER_PATH")
 	if path == "" {
@@ -73,6 +81,11 @@ func getJobHelperPath() (string, error) {
 	return path, nil
 }
 
+// AddJob adds a new job to the jobMap.
+//
+// Parameters:
+//   - jobID: The unique identifier for the job.
+//   - job: The JobInfo containing job metadata.
 func (jm *JobManager) AddJob(jobID string, job *JobInfo) {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
@@ -80,7 +93,14 @@ func (jm *JobManager) AddJob(jobID string, job *JobInfo) {
 	jm.logger.Printf("[INFO] Job %s added to jobMap", jobID)
 }
 
-// Retrieve a job by its ID.
+// GetJob retrieves a job by its ID.
+//
+// Parameters:
+//   - jobID: The unique identifier for the job.
+//
+// Returns:
+//   - *JobInfo: The job metadata, if found.
+//   - bool: True if the job exists, false otherwise.
 func (jm *JobManager) GetJob(jobID string) (*JobInfo, bool) {
 	jm.mu.RLock()
 	defer jm.mu.RUnlock()
@@ -88,6 +108,14 @@ func (jm *JobManager) GetJob(jobID string) (*JobInfo, bool) {
 	return job, exists
 }
 
+// GetJobStatus retrieves the status of a job by its ID.
+//
+// Parameters:
+//   - jobID: The unique identifier for the job.
+//
+// Returns:
+//   - JobStatus: The status of the job.
+//   - bool: True if the job exists, false otherwise.
 func (jm *JobManager) GetJobStatus(jobID string) (JobStatus, bool) {
 	jm.mu.RLock()
 	defer jm.mu.RUnlock()
@@ -99,7 +127,15 @@ func (jm *JobManager) GetJobStatus(jobID string) (JobStatus, bool) {
 	return job.Status, true
 }
 
-// Start a new job with the given command and arguments.
+// StartJob starts a new job with the specified command and arguments.
+//
+// Parameters:
+//   - cmd: The command to execute.
+//   - args: Optional arguments for the command.
+//
+// Returns:
+//   - string: The unique job ID.
+//   - error: An error if job startup fails.
 func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 	if args == nil {
 		args = []string{}
@@ -146,7 +182,13 @@ func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 	return jobID, nil
 }
 
-// Stop a running job by sending a SIGTERM to the jobhelper.
+// StopJob stops a running job by sending a SIGTERM to the jobhelper.
+//
+// Parameters:
+//   - jobID: The unique identifier for the job to stop.
+//
+// Returns:
+//   - error: An error if the job could not be stopped or was not found.
 func (jm *JobManager) StopJob(jobID string) error {
 	jm.logger.Printf("[INFO] Stopping job with ID %s", jobID)
 

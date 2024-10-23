@@ -1,3 +1,4 @@
+// Package jobworker provides functionality for managing jobs and streaming job logs.
 package jobworker
 
 import (
@@ -9,7 +10,15 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// Stream the job's log file to the client.
+// StreamJobOutput streams the log file of the given job to the client via the provided stream function.
+// It first streams any existing log data and then uses inotify to stream new log updates as they occur.
+//
+// Parameters:
+//   - ctx: A context to manage the lifecycle of the streaming operation.
+//   - jobID: The ID of the job whose log is to be streamed.
+//   - streamFunc: A function to handle streaming of byte data.
+//
+// Returns an error if the job is not found, or if streaming encounters issues.
 func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamFunc func([]byte) error) error {
 	jm.logger.Printf("[INFO] Starting log stream for jobID: %s", jobID)
 
@@ -32,7 +41,6 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 	defer file.Close()
 	jm.logger.Printf("[INFO] Successfully opened log file: %s", logFilePath)
 
-	// Check if the job is already finished.
 	jm.mu.RLock()
 	jobStatus := job.Status
 	jm.mu.RUnlock()
@@ -105,6 +113,15 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 	}
 }
 
+// readAndStream reads the log data from the given file and streams it to the client via the stream function.
+//
+// Parameters:
+//   - ctx: A context to manage the lifecycle of the streaming operation.
+//   - file: The file from which to read log data.
+//   - buf: A buffer used for reading data.
+//   - streamFunc: A function to handle streaming of byte data.
+//
+// Returns an error if reading from the file or streaming encounters issues.
 func (jm *JobManager) readAndStream(ctx context.Context, file *os.File, buf []byte, streamFunc func([]byte) error) error {
 	jm.logger.Println("[INFO] Reading and streaming log data...")
 	for {
