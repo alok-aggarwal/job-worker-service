@@ -30,10 +30,10 @@ func assertJobExists(t *testing.T, jm *jobworker.JobManager, jobID string) *jobw
 }
 
 func streamToString(ctx context.Context, jm *jobworker.JobManager, jobID string) (string, error) {
-	var output string
-	streamFunc := func(line string) error {
-		output += line
-		//fmt.Print(line)
+	var output []byte
+	streamFunc := func(data []byte) error {
+		output = append(output, data...)
+		fmt.Printf("%x", data)
 		return nil
 	}
 
@@ -96,4 +96,52 @@ func TestStartJobLong(t *testing.T) {
 	output, err := streamToString(ctx, jm, jobID)
 	assert.NoError(t, err, "Failed to stream job output")
 	assert.NotEmpty(t, output, "Job output is empty")
+}
+
+func TestStopJobWhileStreaming(t *testing.T) {
+	jm := setupJobManager()
+
+	// Start a long-running job.
+	jobID, err := jm.StartJob("/bin/top", []string{"-b"})
+	assert.NoError(t, err, "Failed to start job")
+
+	assertJobExists(t, jm, jobID)
+	time.Sleep(500 * time.Millisecond) // Allow the job to start.
+
+	// Verify the job is running.
+	status, exists := jm.GetJobStatus(jobID)
+	assert.True(t, exists, "Job status not found")
+	assert.Equal(t, jobworker.StatusRunning, status, "Job should be running")
+
+	// Start streaming the job output.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	streamFinished := make(chan struct{})
+	go func() {
+		defer close(streamFinished)
+
+		output, err := streamToString(ctx, jm, jobID)
+		assert.NoError(t, err, "Failed to stream job output")
+		assert.NotEmpty(t, output, "Job output is empty")
+	}()
+
+	// Wait  to ensure streaming has started.
+	time.Sleep(4 * time.Second)
+
+	// Issue StopJob to terminate the job while streaming is in progress.
+	err = jm.StopJob(jobID)
+	assert.NoError(t, err, "Failed to stop job")
+
+	// Ensure streaming ends after StopJob.
+	select {
+	case <-streamFinished:
+		// Successfully stopped streaming
+	case <-time.After(5 * time.Second):
+		t.Fatal("Streaming did not finish after stopping the job")
+	}
+
+	status, exists = jm.GetJobStatus(jobID)
+	assert.True(t, exists, "Job status not found")
+	assert.Equal(t, jobworker.StatusTerminated, status, "Job status should be 'Terminated'")
 }

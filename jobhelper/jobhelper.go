@@ -5,16 +5,23 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"sync"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-var logger *log.Logger
+var (
+	logger     *log.Logger
+	jobCmd     *exec.Cmd
+	reportOnce sync.Once
+)
 
+// Initialize the logger.
 func initLogger() {
 	logFilePath := "jobhelper.log"
-
 	if _, err := os.Stat(logFilePath); err == nil {
 		if err := os.Remove(logFilePath); err != nil {
 			log.Fatalf("[ERROR] Failed to delete previous log file: %v", err)
@@ -44,20 +51,9 @@ func main() {
 
 	pipeW := os.NewFile(3, "pipe")
 
-	logger.Printf("[INFO] Starting jobhelper for jobID: %s, command: %s, args: %v", jobID, command, args)
-
-	// Set PGID to self PID to form a new process group.
-	if err := unix.Setpgid(0, 0); err != nil {
-		logAndExit(pipeW, fmt.Sprintf("[ERROR] Failed to set PGID: %v", err))
-	}
-	logger.Println("[INFO] Set process group ID to self PID.")
-
-	if err := attachToCgroup(os.Getpid()); err != nil {
-		logAndExit(pipeW, fmt.Sprintf("[ERROR] Cgroup attachment failed: %v", err))
-	}
-
-	if err := setupNamespaces(); err != nil {
-		logAndExit(pipeW, fmt.Sprintf("[ERROR] Namespace setup failed: %v", err))
+	// Setup job environment.
+	if err := setupJobEnvironment(pipeW); err != nil {
+		logAndExit(pipeW, fmt.Sprintf("[ERROR] Setup failed: %v", err))
 	}
 
 	logFile, err := getLogFile(jobID)
@@ -68,14 +64,81 @@ func main() {
 
 	logger.Println("[INFO] Setup complete. Indicating success to parent process.")
 	fmt.Fprint(pipeW, "OK")
-	pipeW.Close()
 
 	logger.Printf("[INFO] Executing command: %s with args: %v", command, args)
-	if err := runCommand(command, args, logFile); err != nil {
-		logger.Fatalf("[ERROR] Command execution failed: %v", err)
-	}
+	jobCmd = exec.Command(command, args...)
+	jobCmd.Stdout = logFile
+	jobCmd.Stderr = logFile
+	jobCmd.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
 
-	logger.Println("[INFO] Command executed successfully.")
+	err = jobCmd.Run()
+	exitCode, signalNum := extractExitStatus(err)
+
+	// Report the exit status
+	reportOnce.Do(func() {
+		reportExitStatus(pipeW, exitCode, signalNum)
+	})
+}
+
+// Setup the job environment: signal handler, cgroups, namespaces, and PGID.
+func setupJobEnvironment(pipeW *os.File) error {
+	if err := setupSignalHandler(pipeW); err != nil {
+		return fmt.Errorf("[ERROR] Failed to set up signal handler: %v", err)
+	}
+	if err := unix.Setpgid(0, 0); err != nil {
+		return fmt.Errorf("[ERROR] Failed to set PGID: %v", err)
+	}
+	if err := attachToCgroup(os.Getpid()); err != nil {
+		return fmt.Errorf("[ERROR] Cgroup attachment failed: %v", err)
+	}
+	if err := setupNamespaces(); err != nil {
+		return fmt.Errorf("[ERROR] Namespace setup failed: %v", err)
+	}
+	return nil
+}
+
+// Handle SIGTERM: send SIGKILL to the job process.
+func setupSignalHandler(pipeW *os.File) error {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		logger.Println("[INFO] Received SIGTERM. Sending SIGKILL to job process.")
+
+		if jobCmd != nil && jobCmd.Process != nil {
+			if err := jobCmd.Process.Kill(); err != nil {
+				logger.Printf("[ERROR] Failed to send SIGKILL: %v", err)
+			} else {
+				logger.Println("[INFO] Job process killed.")
+			}
+		}
+
+		reportOnce.Do(func() {
+			reportExitStatus(pipeW, 137, int(syscall.SIGKILL)) // 137 indicates SIGKILL.
+		})
+	}()
+
+	return nil
+}
+
+// Report exit status to jobworker via the pipe.
+func reportExitStatus(pipeW *os.File, exitCode, signalNum int) {
+	logger.Printf("[INFO] Reporting exit status. ExitCode: %d, Signal: %d", exitCode, signalNum)
+	fmt.Fprintf(pipeW, "EXIT %d %d\n", exitCode, signalNum)
+	pipeW.Close()
+}
+
+// Extract exit status and signal number from the error.
+func extractExitStatus(err error) (int, int) {
+	if err == nil {
+		return 0, 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		ws := exitErr.Sys().(syscall.WaitStatus)
+		return ws.ExitStatus(), int(ws.Signal())
+	}
+	return 1, 0 // Default to 1 for general errors.
 }
 
 func logAndExit(pipeW *os.File, msg string) {
@@ -114,15 +177,4 @@ func getLogFile(jobID string) (*os.File, error) {
 
 	logger.Println("[INFO] Log file opened successfully.")
 	return logFile, nil
-}
-
-func runCommand(command string, args []string, logFile *os.File) error {
-	cmd := exec.Command(command, args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-
-	cmd.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
-
-	logger.Printf("[INFO] Running command: %s with args: %v", command, args)
-	return cmd.Run()
 }

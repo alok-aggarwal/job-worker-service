@@ -29,7 +29,7 @@ type JobInfo struct {
 	ExitCode              int
 	SignalNum             int
 	ExitChannel           chan struct{}
-	JobTerminationChannel chan struct{}
+	JobTerminationChannel chan struct{} // signal to streamJob
 }
 
 type JobManager struct {
@@ -65,7 +65,7 @@ func NewJobManager() *JobManager {
 	}
 }
 
-func getJWHelperPath() (string, error) {
+func getJobHelperPath() (string, error) {
 	path := os.Getenv("JOB_HELPER_PATH")
 	if path == "" {
 		return "", fmt.Errorf("[ERROR] JOB_HELPER_PATH environment variable is not set")
@@ -89,7 +89,10 @@ func (jm *JobManager) GetJob(jobID string) (*JobInfo, bool) {
 }
 
 func (jm *JobManager) GetJobStatus(jobID string) (JobStatus, bool) {
-	job, exists := jm.GetJob(jobID)
+	jm.mu.RLock()
+	defer jm.mu.RUnlock()
+
+	job, exists := jm.jobMap[jobID]
 	if !exists {
 		return "", false
 	}
@@ -104,7 +107,7 @@ func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 	jobID := uuid.New().String()
 	jm.logger.Printf("[INFO] Starting job with ID %s: %s %v", jobID, cmd, args)
 
-	jobhelperPath, err := getJWHelperPath()
+	jobhelperPath, err := getJobHelperPath()
 	if err != nil {
 		jm.logger.Printf("[ERROR] Failed to get jobhelper path for job %s: %v", jobID, err)
 		return "", err
@@ -115,9 +118,6 @@ func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 		jm.logger.Printf("[ERROR] Failed to create pipes for job %s: %v", jobID, err)
 		return "", fmt.Errorf("[ERROR] Failed to create pipe: %v", err)
 	}
-	defer pipeR.Close()
-	defer pipeW.Close()
-	jm.logger.Printf("[INFO] Pipe created for job %s", jobID)
 
 	jwCmd := exec.Command(jobhelperPath, append([]string{jobID, cmd}, args...)...)
 	jwCmd.ExtraFiles = []*os.File{pipeW}
@@ -128,48 +128,31 @@ func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 	}
 	jm.logger.Printf("[INFO] jobhelper started for job %s with PID %d", jobID, jwCmd.Process.Pid)
 
-	if err := jm.readSetupStatus(pipeR); err != nil {
-		jm.logger.Printf("[ERROR] jwHelper setup failed for job %s: %v", jobID, err)
-		return "", err
-	}
-
 	job := &JobInfo{
-		PID:         jwCmd.Process.Pid,
-		Cmd:         cmd,
-		Status:      StatusRunning,
-		ExitChannel: make(chan struct{}),
+		PID:                   jwCmd.Process.Pid,
+		Cmd:                   cmd,
+		Status:                StatusRunning,
+		ExitChannel:           make(chan struct{}),
+		JobTerminationChannel: make(chan struct{}),
 	}
 	jm.AddJob(jobID, job)
-	jm.logger.Printf("[INFO] Job %s added to jobMap", jobID)
 
-	jm.logger.Printf("[INFO] Monitoring job %s", jobID)
-	go jm.monitorJob(jobID, jwCmd)
+	done := make(chan struct{})
+
+	go jm.monitorJob(jobID, pipeR, done)
+
+	go jm.monitorJobHelper(jobID, pipeR, jwCmd, done)
 
 	return jobID, nil
 }
 
-func (jm *JobManager) readSetupStatus(pipeR *os.File) error {
-	buf := make([]byte, 128)
-	n, err := pipeR.Read(buf)
-	if err != nil {
-		return fmt.Errorf("[ERROR] Failed to read from setup pipe: %v", err)
-	}
-	status := string(buf[:n])
-	if status != "OK" {
-		return fmt.Errorf("[ERROR] Setup failed: received status '%s'", status)
-	}
-	jm.logger.Printf("[INFO] Setup status 'OK' received from jobhelper")
-	return nil
-}
-
-// Stop a running job by sending a SIGKILL.
+// Stop a running job by sending a SIGTERM to the jobhelper.
 func (jm *JobManager) StopJob(jobID string) error {
 	jm.logger.Printf("[INFO] Stopping job with ID %s", jobID)
 
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
-
 	job, exists := jm.jobMap[jobID]
+
 	if !exists {
 		return fmt.Errorf("[ERROR] Job %s not found", jobID)
 	}
@@ -179,15 +162,15 @@ func (jm *JobManager) StopJob(jobID string) error {
 	}
 
 	job.Status = StatusStopping
-	pgid := -job.PID
-	jm.logger.Printf("[INFO] Sending SIGKILL to PGID %d for job %s", pgid, jobID)
-	if err := syscall.Kill(pgid, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("[ERROR] Failed to kill job %s: %v", jobID, err)
+	jm.mu.Unlock()
+	jm.logger.Printf("[INFO] Sending SIGTERM to PID %d for job %s", job.PID, jobID)
+	if err := syscall.Kill(job.PID, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("[ERROR] Failed to send SIGTERM to job %s: %v", jobID, err)
 	}
 
-	jm.logger.Printf("[INFO] Waiting for job %s to exit", jobID)
+	jm.logger.Printf("[INFO] Waiting for jobhelper of job %s to exit", jobID)
 	<-job.ExitChannel
 
-	jm.logger.Printf("[INFO] Job %s has exited", jobID)
+	jm.logger.Printf("[INFO] Jobhelper for job %s has exited", jobID)
 	return nil
 }

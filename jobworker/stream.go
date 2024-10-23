@@ -10,7 +10,7 @@ import (
 )
 
 // Stream the job's log file to the client.
-func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamFunc func(string) error) error {
+func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamFunc func([]byte) error) error {
 	jm.logger.Printf("[INFO] Starting log stream for jobID: %s", jobID)
 
 	jm.mu.RLock()
@@ -36,9 +36,17 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 	jm.mu.RLock()
 	jobStatus := job.Status
 	jm.mu.RUnlock()
+
+	buf := make([]byte, 1024)
+
+	if err := jm.readAndStream(ctx, file, buf, streamFunc); err != nil {
+		jm.logger.Printf("[ERROR] Error streaming log data: %v", err)
+		return err
+	}
+
 	if jobStatus != StatusRunning {
-		jm.logger.Printf("[INFO] Job %s has already exited. Streaming entire log.", jobID)
-		return jm.streamEntireLog(ctx, file, streamFunc)
+		jm.logger.Printf("[INFO] Job %s has already exited. Done with streaming", jobID)
+		return nil
 	}
 
 	jm.logger.Println("[INFO] Setting up Inotify watcher...")
@@ -54,8 +62,6 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 		return fmt.Errorf("failed to add inotify watch: %v", err)
 	}
 	jm.logger.Println("[INFO] Inotify watcher added successfully.")
-
-	buf := make([]byte, 1024)
 
 	for {
 		select {
@@ -74,7 +80,7 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				jm.logger.Printf("[INFO] Detected log file update for jobID: %s", jobID)
-				if err := jm.readAndStream(file, buf, streamFunc); err != nil {
+				if err := jm.readAndStream(ctx, file, buf, streamFunc); err != nil {
 					jm.logger.Printf("[ERROR] Error streaming log: %v", err)
 					return err
 				}
@@ -82,7 +88,7 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 
 		case <-job.JobTerminationChannel: // Job has exited.
 			jm.logger.Printf("[INFO] Job %s exited. Streaming remaining log data.", jobID)
-			if err := jm.readAndStream(file, buf, streamFunc); err != nil {
+			if err := jm.readAndStream(ctx, file, buf, streamFunc); err != nil {
 				jm.logger.Printf("[ERROR] Error streaming remaining log data: %v", err)
 				return err
 			}
@@ -99,30 +105,8 @@ func (jm *JobManager) StreamJobOutput(ctx context.Context, jobID string, streamF
 	}
 }
 
-func (jm *JobManager) readAndStream(file *os.File, buf []byte, streamFunc func(string) error) error {
+func (jm *JobManager) readAndStream(ctx context.Context, file *os.File, buf []byte, streamFunc func([]byte) error) error {
 	jm.logger.Println("[INFO] Reading and streaming log data...")
-	for {
-		n, err := file.Read(buf)
-		if err == io.EOF {
-			jm.logger.Println("[INFO] Reached end of log file.")
-			return nil
-		}
-		if err != nil {
-			jm.logger.Printf("[ERROR] Error reading log file: %v", err)
-			return fmt.Errorf("error reading log file: %v", err)
-		}
-		jm.logger.Printf("[INFO] Streaming %d bytes of log data.", n)
-		if err := streamFunc(string(buf[:n])); err != nil {
-			jm.logger.Printf("[ERROR] Error sending log data: %v", err)
-			return err
-		}
-	}
-}
-
-func (jm *JobManager) streamEntireLog(ctx context.Context, file *os.File, streamFunc func(string) error) error {
-	jm.logger.Println("[INFO] Streaming entire log file from the beginning.")
-	buf := make([]byte, 1024)
-
 	for {
 		select {
 		case <-ctx.Done(): // Client canceled the request.
@@ -132,7 +116,7 @@ func (jm *JobManager) streamEntireLog(ctx context.Context, file *os.File, stream
 		default:
 			n, err := file.Read(buf)
 			if err == io.EOF {
-				jm.logger.Println("[INFO] Finished streaming the entire log file.")
+				jm.logger.Println("[INFO] Reached end of log file.")
 				return nil
 			}
 			if err != nil {
@@ -140,7 +124,7 @@ func (jm *JobManager) streamEntireLog(ctx context.Context, file *os.File, stream
 				return fmt.Errorf("error reading log file: %v", err)
 			}
 			jm.logger.Printf("[INFO] Streaming %d bytes of log data.", n)
-			if err := streamFunc(string(buf[:n])); err != nil {
+			if err := streamFunc(buf[:n]); err != nil {
 				jm.logger.Printf("[ERROR] Error sending log data: %v", err)
 				return err
 			}
