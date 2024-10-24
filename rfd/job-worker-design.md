@@ -18,15 +18,26 @@ The CLI allows users to interact with the Job Worker server to manage jobs. The 
 using the Cobra library, which provides a flexible framework for parsing commands and arguments.
 
 ### Example CLI Commands
-#### runjob-cli start --cmd="program"
+#### runjob-cli start `<program with args>`
 The command returns a unique JobID that is used for further interactions with the job.
+The command fails if no program is provided.
 #### runjob-cli stop `<job-id>`
+The command fails if no job-id is provided.
 #### runjob-cli status `<job-id>`
-Possible statuses are Running, Exited (Exit Code), or Terminated (Signal).
+The command fails if no job-id is provided.
+Display format:
+```
+Job ID     Command                       Status           Exit Code     Signal Num
+------------------------------------------------------------------------------------         
+xyz456     /usr/bin/top                   Exited           0
+```
+Possible statuses are Running, Exited (Exit Code), Terminated (Signal), or Server Error
 #### runjob-cli stream-output `<job-id>`
+The command fails if no job-id is provided.
 Streams the real-time output (both stdout and stderr) of the running process to the terminal from the moment the job starts.
 Use ctrl+C to stop streaming.
 #### runjob-cli list-jobs
+Display format"
 ```
 Job ID     Command                       Status           Exit Code     Signal Num
 ------------------------------------------------------------------------------------
@@ -34,6 +45,8 @@ abc123     /bin/ls -al                    Running
 xyz456     /usr/bin/top                   Exited           0
 def789     /usr/bin/sleep 1000            Terminated                      9
 ```
+#### runjob-cli clean-all-jobs
+Stops all running jobs and deletes all job information.
 
 ## Job Worker (Server)
 The Job Worker Server manages the lifecycle of jobs, interacting with the underlying library and handling multiple clients. 
@@ -46,6 +59,7 @@ service JobWorker {
     rpc GetJobStatus(GetJobStatusRequest) returns (JobStatus);
     rpc StreamJobOutput(StreamJobOutputRequest) returns (stream JobOutputResponse);
     rpc ListJobs (ListJobsRequest) returns (ListJobsResponse);
+    rpc CleanAllJobs (CleanAllJobsRequest) returns (CleanAllJobsResponse);
 }
 message StartJobRequest {
     string command = 1;          
@@ -81,6 +95,12 @@ message JobOutputResponse {
 message ListJobsRequest {}
 message ListJobsResponse {
     repeated JobStatus job_list = 1;
+}
+
+message CleanAllJobsRequest {}
+
+message CleanAllJobsResponse {
+    bool success = 1;
 }
 ```
 
