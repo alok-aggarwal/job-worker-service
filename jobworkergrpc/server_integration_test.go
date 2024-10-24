@@ -38,9 +38,9 @@ func setupGRPCClient() (pb.JobWorkerClient, error) {
 	caCertPool.AppendCertsFromPEM(caCert)
 
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		RootCAs:            caCertPool,
-		InsecureSkipVerify: true, // Skip hostname verification
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+		ServerName:   "localhost", // Must match the server certificate's CN
 	})
 
 	conn, err := grpc.Dial("localhost:60001", grpc.WithTransportCredentials(creds))
@@ -82,9 +82,9 @@ func setupInvalidGRPCClient() (pb.JobWorkerClient, error) {
 	caCertPool.AppendCertsFromPEM(caCert)
 
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		RootCAs:            caCertPool,
-		InsecureSkipVerify: true, // Skip hostname verification
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+		ServerName:   "localhost", // Must match the server certificate's CN
 	})
 
 	conn, err := grpc.Dial("localhost:60001", grpc.WithTransportCredentials(creds))
