@@ -63,11 +63,10 @@ func TestStartJobShort(t *testing.T) {
 
 	status, exists := jm.GetJobStatus(jobID)
 	assert.True(t, exists, "Job status not found")
-	assert.Equal(t, jobworker.StatusExited, status, "Job should be exited")
+	assert.Equal(t, jobworker.StatusExited, status.Status, "Job should be exited")
 	assert.Equal(t, 0, job.ExitCode, "Exit code should be 0")
 
 	logFilePath := filepath.Join(LOGS_DIR, fmt.Sprintf("%s.log", jobID))
-	// defer os.Remove(logFilePath) // Cleanup
 
 	info, err := os.Stat(logFilePath)
 	assert.NoError(t, err, "Logfile not found")
@@ -93,7 +92,7 @@ func TestStartJobLong(t *testing.T) {
 
 	status, exists := jm.GetJobStatus(jobID)
 	assert.True(t, exists, "Job status not found")
-	assert.Equal(t, jobworker.StatusRunning, status, "Job should be running")
+	assert.Equal(t, jobworker.StatusRunning, status.Status, "Job should be running")
 
 	logFilePath := filepath.Join(LOGS_DIR, fmt.Sprintf("%s.log", jobID))
 	// defer os.Remove(logFilePath) // Cleanup
@@ -124,7 +123,7 @@ func TestStopJobWhileStreaming(t *testing.T) {
 	// Verify the job is running.
 	status, exists := jm.GetJobStatus(jobID)
 	assert.True(t, exists, "Job status not found")
-	assert.Equal(t, jobworker.StatusRunning, status, "Job should be running")
+	assert.Equal(t, jobworker.StatusRunning, status.Status, "Job should be running")
 
 	// Start streaming the job output.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -156,5 +155,5 @@ func TestStopJobWhileStreaming(t *testing.T) {
 
 	status, exists = jm.GetJobStatus(jobID)
 	assert.True(t, exists, "Job status not found")
-	assert.Equal(t, jobworker.StatusTerminated, status, "Job status should be 'Terminated'")
+	assert.Equal(t, jobworker.StatusTerminated, status.Status, "Job status should be 'Terminated'")
 }

@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+option go_package = ".";
+
+service JobWorker {
+    rpc StartJob(StartJobRequest) returns (StartJobResponse);
+    rpc StopJob(StopJobRequest) returns (StopJobResponse);
+    rpc GetJobStatus(GetJobStatusRequest) returns (JobStatus);
+    rpc StreamJobOutput(StreamJobOutputRequest) returns (stream JobOutputResponse);
+    rpc ListJobs (ListJobsRequest) returns (ListJobsResponse);
+    rpc CleanAllJobs (CleanAllJobsRequest) returns (CleanAllJobsResponse);
+}
+message StartJobRequest {
+    string command = 1;          
+    repeated string args = 2;     
+}
+message StartJobResponse {
+    string job_id = 1;         
+}
+message StopJobRequest {
+    string job_id = 1;        
+}
+message StopJobResponse {}
+
+message GetJobStatusRequest {
+    string job_id = 1;      
+}
+message JobStatus {      
+    string job_id = 1;
+    string command = 2;
+    string status = 3;       // "Running", "Exited", "Terminated" or "Server Error"
+    string exit_code = 4;    // non null if status = "Exited"
+    string sig_num = 5;      // non null if status = "Terminated"
+}
+message StreamJobOutputRequest {
+    string job_id = 1;          
+}
+message JobOutputResponse {
+    bytes output = 1;          // Raw byte output from the job log
+}
+message ListJobsRequest {}
+message ListJobsResponse {
+    repeated JobStatus job_list = 1;
+}
+
+message CleanAllJobsRequest {}
+
+message CleanAllJobsResponse {
+    bool success = 1;
+}

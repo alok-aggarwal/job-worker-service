@@ -5,32 +5,43 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/google/uuid"
 )
 
-// JobStatus represents the possible states a job can have.
-type JobStatus string
+// JobStatusStr represents the possible states a job can have.
+type JobStatusStr string
 
 const (
-	StatusRunning    JobStatus = "Running"      // Job is currently running.
-	StatusExited     JobStatus = "Exited"       // Job exited normally.
-	StatusStopping   JobStatus = "Stopping"     // Job is in the process of stopping.
-	StatusTerminated JobStatus = "Terminated"   // Job was terminated by a signal.
-	StatusServerErr  JobStatus = "Server Error" // A server error occurred.
+	StatusRunning    JobStatusStr = "Running"      // Job is currently running.
+	StatusExited     JobStatusStr = "Exited"       // Job exited normally.
+	StatusStopping   JobStatusStr = "Stopping"     // Job is in the process of stopping.
+	StatusTerminated JobStatusStr = "Terminated"   // Job was terminated by a signal.
+	StatusServerErr  JobStatusStr = "Server Error" // A server error occurred.
 )
 
 // JobInfo holds metadata for a job, including its status, PID, and exit information.
 type JobInfo struct {
 	PID                   int           // Process ID of the jobhelper.
+	JobId                 string        // Unique identifier for the job.
 	Cmd                   string        // Command executed for the job.
-	Status                JobStatus     // Current status of the job.
+	Status                JobStatusStr  // Current status of the job.
 	ExitCode              int           // Exit code of the job.
 	SignalNum             int           // Signal number if the job was terminated by a signal.
 	ExitChannel           chan struct{} // Channel to signal job exit.
 	JobTerminationChannel chan struct{} // Channel to signal job termination to streaming functions.
+}
+
+// JobStatus holds the status information of a job to be returned to the client.
+type JobStatus struct {
+	ID        string
+	Cmd       string
+	Status    string // "Running", "Exited", "Terminated", or "Server Error"
+	ExitCode  int    // Non-zero if the job exited with an error
+	SignalNum int    // Non-zero if the job was terminated by a signal
 }
 
 // JobManager manages jobs, including starting, stopping, and monitoring their status.
@@ -74,11 +85,7 @@ func NewJobManager() *JobManager {
 //
 // Returns the path or an error if the variable is not set.
 func getJobHelperPath() (string, error) {
-	path := os.Getenv("JOB_HELPER_PATH")
-	if path == "" {
-		return "", fmt.Errorf("[ERROR] JOB_HELPER_PATH environment variable is not set")
-	}
-	return path, nil
+	return "../jobhelper/jobhelper", nil
 }
 
 // AddJob adds a new job to the jobMap.
@@ -122,9 +129,19 @@ func (jm *JobManager) GetJobStatus(jobID string) (JobStatus, bool) {
 
 	job, exists := jm.jobMap[jobID]
 	if !exists {
-		return "", false
+		return JobStatus{}, false
 	}
-	return job.Status, true
+
+	// Populate JobStatus struct from JobInfo fields.
+	jobStatus := JobStatus{
+		ID:        jobID,
+		Cmd:       job.Cmd,
+		Status:    string(job.Status),
+		ExitCode:  job.ExitCode,
+		SignalNum: job.SignalNum,
+	}
+
+	return jobStatus, true
 }
 
 // StartJob starts a new job with the specified command and arguments.
@@ -164,9 +181,18 @@ func (jm *JobManager) StartJob(cmd string, args []string) (string, error) {
 	}
 	jm.logger.Printf("[INFO] jobhelper started for job %s with PID %d", jobID, jwCmd.Process.Pid)
 
+	fullCmd := cmd
+	if len(args) > 0 {
+		if fullCmd != "" {
+			fullCmd += " "
+		}
+		fullCmd += strings.Join(args, " ")
+	}
+
 	job := &JobInfo{
 		PID:                   jwCmd.Process.Pid,
-		Cmd:                   cmd,
+		JobId:                 jobID,
+		Cmd:                   fullCmd,
 		Status:                StatusRunning,
 		ExitChannel:           make(chan struct{}),
 		JobTerminationChannel: make(chan struct{}),
@@ -215,4 +241,49 @@ func (jm *JobManager) StopJob(jobID string) error {
 
 	jm.logger.Printf("[INFO] Jobhelper for job %s has exited", jobID)
 	return nil
+}
+
+// ListJobs returns a list of all jobs in the jobMap.
+func (jm *JobManager) ListJobs() []*JobStatus {
+	jm.mu.RLock()
+	defer jm.mu.RUnlock()
+
+	var jobs []*JobStatus
+	for _, job := range jm.jobMap {
+		jobs = append(jobs, &JobStatus{
+			ID:        job.JobId,
+			Cmd:       job.Cmd,
+			Status:    string(job.Status),
+			ExitCode:  job.ExitCode,
+			SignalNum: job.SignalNum,
+		})
+	}
+	return jobs
+}
+
+// CleanAllJobs stops all running jobs and clears the job map.
+func (jm *JobManager) CleanAllJobs() {
+	// Collect IDs of running jobs without holding the lock for too long.
+	var runningJobIDs []string
+
+	jm.mu.RLock()
+	for jobID, job := range jm.jobMap {
+		if job.Status == StatusRunning {
+			runningJobIDs = append(runningJobIDs, jobID)
+		}
+	}
+	jm.mu.RUnlock()
+
+	// Stop all running jobs outside the lock to avoid deadlock.
+	for _, jobID := range runningJobIDs {
+		jm.logger.Printf("[INFO] Stopping running job: %s", jobID)
+		_ = jm.StopJob(jobID) // Ignore errors to ensure all jobs are processed.
+	}
+
+	// Acquire the lock again to clear the job map.
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+
+	jm.logger.Printf("[INFO] Clearing all job records.")
+	jm.jobMap = make(map[string]*JobInfo)
 }
