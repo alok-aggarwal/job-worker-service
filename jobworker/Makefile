@@ -7,7 +7,7 @@ SRC = $(wildcard *.go)
 
 export JOB_HELPER_PATH=../jobhelper/jobhelper
 
-all: deps build
+all: deps build jobhelper
 
 deps:
 	@echo "Fetching dependencies for jobworker library..."

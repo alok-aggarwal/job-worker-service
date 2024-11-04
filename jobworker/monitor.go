@@ -101,7 +101,7 @@ func (jm *JobManager) monitorJob(jobID string, pipeR *os.File, done chan struct{
 //   - status: The new status of the job.
 //   - exitCode: The exit code of the job process, if available.
 //   - signalNum: The signal number if the job was terminated by a signal.
-func (jm *JobManager) updateJobStatus(jobID string, status JobStatus, exitCode, signalNum int) {
+func (jm *JobManager) updateJobStatus(jobID string, status JobStatusStr, exitCode, signalNum int) {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
 
