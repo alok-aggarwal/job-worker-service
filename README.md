@@ -1,8 +1,41 @@
-# job-worker-service
-Run Arbitrary Process Server and Client
+# Job Worker Service
+The Job Worker Service is a robust and efficient server designed to manage and monitor the execution of jobs on a host system. 
+This project provides a complete solution for job management, with functionality to start, stop, monitor, and stream output 
+for various processes. It leverages gRPC for client-server communication, mTLS for secure interactions, and cgroups for resource
+management, making it ideal for scenarios that require controlled and secure job execution.
+
+## Key Components
+### JobWorker Server
+
+The main component that provides gRPC APIs to manage jobs.
+Each job is executed through a helper process (JobHelper) which manages the job's lifecycle, logging, and cleanup.
+Uses a structured job map to track job status, exit codes, and resource limits in real time.
+
+### JobHelper:
+
+A lightweight helper process responsible for setting up and executing the job command.
+Attaches jobs to specified cgroups to manage resource consumption and isolates jobs using Linux namespaces.
+Reports setup status and final job status (including exit codes and termination signals) back to the JobWorker through inter-process
+communication.
+
+### gRPC API:
+
+* Offers endpoints for:
+StartJob: Launches a job and returns a unique JobID.
+StopJob: Terminates a running job.
+GetJobStatus: Retrieves the current status of a job.
+StreamJobOutput: Streams live job output to the client.
+ListJobs: Lists all current jobs and their statuses.
+CleanAllJobs: Stops all running jobs and clears the job map.
+* Designed for parallel requests and secure access, with mTLS authentication and authorization based on client certificate Common Names.
 
 
-# Directory Structure
+### runjob-cli
+runjob-cli is a command-line interface (CLI) tool designed to interact with the Job Worker server, which manages job execution, monitoring,
+and resource control. This CLI connects to the server using gRPC with mutual TLS (mTLS) authentication to ensure secure communication.
+
+
+## Directory Structure
 ```
 /job-worker-service
 │
@@ -47,8 +80,8 @@ Run Arbitrary Process Server and Client
 
 ```
 
-# Building and Running the Project
-## Server
+## Building and Running the Project
+### Server
 ```
 alok@alok:~/job-worker-service/jobworkergrpc$ make all
 
@@ -57,7 +90,7 @@ alok@alok:~/job-worker-service/jobworkergrpc$ sudo ./server
 
 ```
 
-## Client
+### Client
 ```
 alok@alok:~/job-worker-service/runjob-cli$ make all
 
@@ -133,7 +166,7 @@ alok@alok:~/job-worker-service/runjob-cli$ ./runjob-cli list-jobs
 No active jobs found.
 ```
 
-# Further Improvements
+## Further Improvements
 - Add more tests to cover more scenarios and edge cases. 
 - Convert structures into interfaces to make it easier to mock and test.
 - Add more logging and metrics to the server and client.
